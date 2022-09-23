@@ -108,49 +108,75 @@ def beta_func(t):
 	return torch.sigmoid((t / 6) - 8)
 
 
-def noise_graph(edges, node_feats, beta, t_0, t_1):
+def beta_bar_func(t):
 	"""
-	Given a graph at time `t_0`, return a version of the graph that has noise
-	added to it at time `t_1`. To add noise in a single time step, make `t_1`
-	equal to `t_0 + 1`.
+	Maps a tensor of times `t` to beta-bar values. If each beta is a probability
+	of a flip at some particular time, then beta-bar is the probability of a
+	flip from 0 until this `t`.
 	Arguments:
-		`edges`: a binary B x E tensor of edges at time `t_0`
-		`node_feats`: a B x V x D tensor of node features at time `t_0`
-		`beta`: a function which maps a tensor of times to a noise level beta
-		`t_0`: time of current graph, a B-tensor
-		`t_1`: time to add noise to, a B-tensor
+		`t`: a B-tensor of times
+	Returns a B-tensor of beta-bar values.
+	"""
+	max_range = torch.arange(1, torch.max(t) + 1, device=DEVICE)
+	betas = beta_func(max_range)  # Shape: maxT
+
+	betas_tiled = torch.tile(betas, (t.shape[0], 1))  # Shape: B x maxT
+	biases = 0.5 - betas_tiled
+
+	# Anything that ran over a time t, set to 1
+	mask = max_range[None] > t[:, None]
+	biases[mask] = 1
+
+	prod = torch.prod(biases, dim=1)
+	return 0.5 - (torch.pow(2, t - 1) * prod)
+
+
+def noise_graph(edges, node_feats, t):
+	"""
+	Given a graph at time 0, return a version of the graph that has noise
+	added to it at time `t`.
+	Arguments:
+		`edges`: a binary B x E tensor of edges at time 0
+		`node_feats`: a B x V x D tensor of node features at time 0
+		`t`: time to add noise to, a B-tensor
 	Returns a new B x E tensor and B x V x D tensor of edges and node features
 	with noise added to it, and leaves the originals untouched.
 	"""
-	range_lens = t_1 - t_0
-	max_range = torch.max(range_lens)
-	ranges = torch.tile(
-		torch.arange(max_range, device=DEVICE), (t_0.shape[0], 1)
-	)  # Shape: B x maxT
-	betas = beta(ranges + t_0[:, None])
+	prob_flip = torch.tile(beta_bar_func(t)[:, None], (1, edges.shape[1]))
 
-	# Sample a B x E x T binary tensor, where there is a 1 if a flip occurs
-	flip_indicators = torch.bernoulli(
-		torch.tile(betas[:, None], (1, edges.shape[1], 1))
-	)
-	
-	# Anything that ran over the range length edge, set to 0
-	mask = torch.tile(
-		(ranges >= range_lens[:, None])[:, None], (1, edges.shape[1], 1)
-	)
-	flip_indicators[mask] = 0
-
-	# For each edge, a flip occurs if over time the number of flips is odd
-	flip_indicators_sum = torch.remainder(torch.sum(flip_indicators, dim=2), 2)
+	flip_indicators = torch.bernoulli(prob_flip)
 
 	# Perform edge flips
 	new_edges = edges.clone()
-	mask = flip_indicators_sum == 1
+	mask = flip_indicators == 1
 	new_edges[mask] = 1 - new_edges[mask]
 
 	new_node_feats = node_feats.clone()
 
 	return new_edges, new_node_feats
+
+
+def posterior_edge_prob(edges_0, edges_t, t):
+	"""
+	Compute the probability of an edge at time t - 1, given the edges at time 0
+	and t.
+	Arguments:
+		`edges_0`: a binary B x E tensor of edges at time 0
+		`edges_t`: a binary B x E tensor of edges at time t
+		`t`: B-tensor of times
+	Returns a B x E tensor of probabilities that an edge would exist at time
+	t - 1.
+	"""
+	beta_t = beta_func(t)[:, None]
+	beta_bar_t = beta_bar_func(t)[:, None]
+	beta_bar_t_1 = beta_bar_func(t - 1)[:, None]
+
+	term_1 = ((1 - edges_t) * beta_t) + (edges_t * (1 - beta_t))
+	term_2 = ((1 - edges_0) * beta_bar_t_1) + (edges_0 * (1 - beta_bar_t_1))
+	x0_xor_xt = torch.square(edges_0 - edges_t)
+	term_3 = (x0_xor_xt * beta_bar_t) + ((1 - x0_xor_xt) * (1 - beta_bar_t))
+
+	return term_1 * term_2 / term_3
 
 
 class GraphDenoiser(torch.nn.Module):
@@ -185,8 +211,6 @@ class GraphDenoiser(torch.nn.Module):
 		self.edge_dec.append(torch.nn.Linear(dims[-1], num_edges))
 		self.edge_dec.append(torch.nn.Sigmoid())
 
-		self.bce_loss = torch.nn.BCELoss(reduction="none")
-
 	def forward(self, edges, node_feats, times):
 		"""
 		Runs forward pass of model for a batch of B items.
@@ -205,17 +229,22 @@ class GraphDenoiser(torch.nn.Module):
 			x = layer(x)
 		return x, node_feats
 
-	def loss(self, pred_edges, true_edges, pred_node_feats, true_node_feats):
+	def loss(self, pred_edge_probs, true_edge_probs):
 		"""
 		Computes the loss of a batch.
 		Arguments:
-			`pred_edges`: a B x E tensor of predicted edge probabilities
-			`true_edges`: a binary B x E tensor of true edges
-			`pred_node_feats`: a B x V x D tensor of predicted node features
-			`true_node_feats`: a B x V x D tensor of true node features
+			`pred_edge_probs`: a B x E tensor of predicted edge probabilities
+			`true_edge_probs`: a binary B x E tensor of true edges
 		Returns a B-tensor of loss values.
 		"""
-		return torch.mean(self.bce_loss(pred_edges, true_edges), dim=1)	
+		return torch.nanmean(
+			(true_edge_probs * torch.log(true_edge_probs / pred_edge_probs)) +
+			(
+				(1 - true_edge_probs) *
+				torch.log((1 - true_edge_probs) / (1 - pred_edge_probs))
+			),
+			dim=1
+		)
 
 
 class RandomGraphDataset(torch.utils.data.IterableDataset):
@@ -292,30 +321,28 @@ def train_model(model, data_loader, t_limit, num_epochs, learning_rate):
 			edges_0 = torch.tensor(edges_0).float().to(DEVICE)
 			node_feats_0 = torch.tensor(node_feats_0).float().to(DEVICE)
 
-			# Pick some random times t-1 between 0 and t_limit
-			t_1 = torch.randint(
+			# Pick some random times t between 1 and t_limit (inclusive)
+			t = torch.randint(
 				t_limit, size=(edges_0.shape[0],), device=DEVICE
-			)
+			) + 1
 
-			# Add noise to graphs from time 0 to time t - 1
-			edges_t_1, node_feats_t_1 = noise_graph(
-				edges_0, node_feats_0, beta_func, 
-				torch.zeros(edges_0.shape[0], device=DEVICE), t_1
-			)
-
-			# Add one more step of noise
+			# Add noise to graphs from time 0 to time t
 			edges_t, node_feats_t = noise_graph(
-				edges_t_1, node_feats_t_1, beta_func,
-				t_1, t_1 + 1
+				edges_0, node_feats_0, t
 			)
 
-			# Have model try and predict graph at t - 1 from time t
-			pred_edges_t_1, pred_node_feats_t_1 = model(
-				edges_t, node_feats_t, t_1
+			# Compute posterior probability of edges
+			true_edge_probs = posterior_edge_prob(
+				edges_0, edges_t, t
+			)
+
+			# Have model try and predict posterior probability
+			pred_edge_probs, _ = model(
+				edges_t, node_feats_t, t
 			)
 
 			loss = torch.mean(model.loss(
-				pred_edges_t_1, edges_t_1, pred_node_feats_t_1, node_feats_t_1
+				pred_edge_probs, true_edge_probs
 			))
 			
 			optimizer.zero_grad()
@@ -353,7 +380,7 @@ data_loader = torch.utils.data.DataLoader(
 # t_0 = torch.zeros(edges_0.shape[0], device=DEVICE)
 # for i, t in tqdm.tqdm(enumerate(t_vals), total=len(t_vals)):
 # 	t_tens = torch.ones(edges_0.shape[0], device=DEVICE) * t
-# 	edges_t, _ = noise_graph(edges_0, node_feats_0, beta_func, t_0, t_tens)
+# 	edges_t, _ = noise_graph(edges_0, node_feats_0, t_tens)
 # 	for j in range(dataset.batch_size):
 # 		g = nx.empty_graph(num_nodes)
 # 		set_edges(g, edges_t[j].cpu().numpy())
@@ -367,10 +394,23 @@ data_loader = torch.utils.data.DataLoader(
 # ax.set_title("Actual progression of cycles")
 # plt.show()
 
+# # Check progression of posterior probability
+# t_vals = np.arange(1, t_limit)
+# edges_0, node_feats_0 = next(iter(data_loader))
+# posterior_probs = np.empty((len(t_vals), dataset.batch_size, edges_0.shape[1]))
+# edges_0 = torch.tensor(edges_0).to(DEVICE)
+# node_feats_0 = torch.tensor(node_feats_0).to(DEVICE)
+# t_0 = torch.zeros(edges_0.shape[0], device=DEVICE)
+# for i, t in tqdm.tqdm(enumerate(t_vals), total=len(t_vals)):
+# 	t_tens = torch.ones(edges_0.shape[0], device=DEVICE) * t
+# 	edges_t, _ = noise_graph(edges_0, node_feats_0, t_tens)
+# 	p = posterior_edge_prob(edges_0, edges_t, t_tens)
+# 	posterior_probs[i] = p.cpu().numpy()
+
 model = GraphDenoiser(num_nodes, node_dim).to(DEVICE)
 train_model(
 	model, data_loader,
-	t_limit=50,
+	t_limit=t_limit,
 	num_epochs=3,
 	learning_rate=0.001
 )
@@ -387,12 +427,15 @@ for i in range(batch_size):
 edges = torch.tensor(edges).float().to(DEVICE)
 node_feats = torch.tensor(node_feats).float().to(DEVICE)
 
-for t in tqdm.trange(50 - 1, 1, -1):
-	edges, _ = model(
+for t in tqdm.trange(t_limit - 1, 1, -1):
+	edge_probs, _ = model(
 		edges, node_feats, torch.ones(batch_size, device=DEVICE) * t
 	)
+	print(torch.mean(edge_probs, dim=1))
+	edges = torch.bernoulli(edge_probs)
 
 	graphs = []
+	num_edges = []
 	num_cycles = []
 	num_components = []
 	e = edges.detach().cpu().numpy()
@@ -400,22 +443,28 @@ for t in tqdm.trange(50 - 1, 1, -1):
 		g = nx.empty_graph(num_nodes)
 		set_edges(g, e[i])
 		graphs.append(g)
+		num_edges.append(np.sum(e[i]))
 		num_cycles.append(len(nx.cycle_basis(g)))
 		num_components.append(nx.number_connected_components(g))
-	print(num_cycles)
-	print(num_components)
-	print("---------")
+	
+	# print(num_edges)
+	# print(num_cycles)
+	# print(num_components)
+	# print("---------")
+	# break
 
-edges = edges.detach().cpu().numpy()
+e = edges.detach().cpu().numpy()
 graphs = []
+num_edges = []
 num_cycles = []
 num_components = []
 for i in range(batch_size):
 	g = nx.empty_graph(num_nodes)
-	set_edges(g, edges[i])
+	set_edges(g, e[i])
 	graphs.append(g)
+	num_edges.append(np.sum(e[i]))
 	num_cycles.append(len(nx.cycle_basis(g)))
 	num_components.append(nx.number_connected_components(g))
-
-print(num_cycles)
-print(num_components)
+# print(num_edges)
+# print(num_cycles)
+# print(num_components)
