@@ -86,7 +86,7 @@ class DiscreteDiffuser:
 
 
 class GaussianDiffuser(DiscreteDiffuser):
-
+	# Diffuser which adds Gaussian noise to the inputs
 	def __init__(self, beta_1, delta_beta, input_shape, seed=None):
 		"""
 		Arguments:
@@ -213,7 +213,7 @@ class GaussianDiffuser(DiscreteDiffuser):
 
 
 class BernoulliDiffuser(DiscreteDiffuser):
-
+	# Diffuser which flips bits in the inputs
 	def __init__(self, a, b, input_shape, seed=None):
 		"""
 		Arguments:
@@ -292,11 +292,11 @@ class BernoulliDiffuser(DiscreteDiffuser):
 		beta_bar_t_1 = self._inflate_dims(self._beta_bar(t - 1))
 
 		prob_flip = torch.tile(beta_bar_t, (1, *x0.shape[1:]))
-		flip_indicators = torch.bernoulli(prob_flip)
+		indicators = torch.bernoulli(prob_flip)
 
 		# Perform flips
 		xt = x0.clone()
-		mask = flip_indicators == 1
+		mask = indicators == 1
 		xt[mask] = 1 - x0[mask]
 		
 		if return_posterior:
@@ -343,6 +343,276 @@ class BernoulliDiffuser(DiscreteDiffuser):
 		size = torch.Size([num_samples] + list(self.input_shape))
 		probs = torch.tile(self.half, size)
 		return torch.bernoulli(probs)
+	
+	def __str__(self):
+		return self.string
+
+
+class BernoulliOneDiffuser(DiscreteDiffuser):
+	# Diffuser which sets bits to 1 in the inputs
+	def __init__(self, a, b, input_shape, seed=None, reverse_reflect=False):
+		"""
+		Arguments:
+			`a`: stretch factor of logistic beta function
+			`b`: shift factor of logistic beta function
+			`input_shape`: a tuple of ints which is the shape of input tensors
+				x; does not include batch dimension
+			`seed`: random seed for sampling and running the diffusion process
+			`reverse_reflect`: if True, enforce that the reverse-diffusion
+				process only sets entries to 0; if False, the reverse-diffusion
+				process samples from the Bernoulli posterior as usual
+		"""
+		super().__init__(input_shape, seed)
+
+		self.a = torch.tensor(a).to(DEVICE)
+		self.b = torch.tensor(b).to(DEVICE)
+		self.string = "Bernoulli One Diffuser (beta(t) = s((t / %.2f) - %.2f)" \
+			% (a, b)
+		self.reverse_reflect = reverse_reflect
+		
+	def _beta(self, t):
+		"""
+		Computes beta(t), which is the probability of a flip to 1 at time `t`.
+		Arguments:
+			`t`: a B-tensor of times
+		Returns a B-tensor of beta values.
+		"""
+		# Subtract 1 from t: when t = 1, beta(t) = beta_1
+		return torch.sigmoid((t / self.a) - self.b)
+		
+	def _beta_bar(self, t):
+		"""
+		Computes beta-bar(t), which is the probability of a flip to 1 from time
+		0 to time `t` (flip is assuming the bit at time 0 is 0).
+		Arguments:
+			`t`: a B-tensor of times
+		Returns a B-tensor of beta-bar values.
+		"""
+		max_range = torch.arange(1, torch.max(t) + 1, device=DEVICE)
+		betas = self._beta(max_range)  # Shape: maxT
+
+		betas_tiled = torch.tile(betas, (t.shape[0], 1))  # Shape: B x maxT
+		comps = 1 - betas_tiled
+
+		# Anything that ran over a time t, set to 1
+		mask = max_range[None] > t[:, None]
+		comps[mask] = 1
+		
+		# Do the product in log-space and transform back for stability
+		log_prod = torch.sum(torch.log(comps), dim=1)
+		prod = torch.exp(log_prod)
+
+		return 1 - prod
+
+	def forward(self, x0, t, return_posterior=True):
+		"""
+		Runs diffusion process forward given starting point `x0` and a time `t`.
+		Optionally also returns a tensor which represents the posterior of
+		x_{t-1} given xt and/or x0 (e.g. probability, mean, noise, etc.)
+		Arguments:
+			`x0`: a B x `self.input_shape` tensor containing the data at some
+				time points
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+		Returns a B x `self.input_shape` tensor to represent xt. If
+		`return_posterior` is True, then also returns a B x `self.input_shape`
+		tensor which is a parameter of the posterior.
+		"""
+		beta_t = self._inflate_dims(self._beta(t))
+		beta_bar_t = self._inflate_dims(self._beta_bar(t))
+		beta_bar_t_1 = self._inflate_dims(self._beta_bar(t - 1))
+
+		prob_one = x0 + ((1 - x0) * beta_bar_t)
+		indicators = torch.bernoulli(prob_one)
+
+		# Perform sampling
+		xt = x0.clone()
+		mask = indicators == 1
+		xt[mask] = 1  # Set to 1
+		
+		if return_posterior:
+			term_1 = xt
+			term_2 = x0 + ((1 - x0) * beta_bar_t_1)
+			term_3 = (x0 * xt) + ((1 - x0) * xt * beta_bar_t) + \
+				((1 - x0) * (1 - xt) * (1 - beta_bar_t))
+
+			post = term_1 * term_2 / term_3
+			# Due to small numerical instabilities (particularly at t = 0), clip
+			# the probabilities
+			post = torch.clamp(post, 0, 1) 
+			return xt, post
+		return xt
+
+	def reverse_step(self, xt, t, post):
+		"""
+		Performs a reverse sampling step to compute x_{t-1} given xt and the
+		posterior quantity (or an estimate of it) defined in `posterior`.
+		Arguments:
+			`xt`: a B x `self.input_shape` tensor containing the data at time t
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+			`post`: a B x `self.input_shape` tensor containing the posterior
+				quantity (or a model-predicted estimate of it) as defined in
+				`posterior`
+		Returns a B x `self.input_shape` tensor for x_{t-1}.
+		"""
+		# Ignore xt and t
+		if self.reverse_reflect:
+			xt_1 = xt.clone()
+			indicators = torch.bernoulli(post)
+			xt_1[indicators == 0] = 0  # Only set to 0 when a 0 is sampled
+			return xt_1
+		return torch.bernoulli(post)
+
+	def sample_prior(self, num_samples, t):
+		"""
+		Samples from the prior distribution specified by the diffusion process
+		at time `t`.
+		Arguments:
+			`num_samples`: B, the number of samples to return
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+		Returns a B x `self.input_shape` tensor for the `xt` values that are
+		sampled.
+		"""
+		# Ignore t
+		size = torch.Size([num_samples] + list(self.input_shape))
+		return torch.ones(size, device=DEVICE)
+	
+	def __str__(self):
+		return self.string
+
+
+class BernoulliZeroDiffuser(DiscreteDiffuser):
+	# Diffuser which sets bits to 0 in the inputs
+	def __init__(self, a, b, input_shape, seed=None, reverse_reflect=False):
+		"""
+		Arguments:
+			`a`: stretch factor of logistic beta function
+			`b`: shift factor of logistic beta function
+			`input_shape`: a tuple of ints which is the shape of input tensors
+				x; does not include batch dimension
+			`seed`: random seed for sampling and running the diffusion process
+			`reverse_reflect`: if True, enforce that the reverse-diffusion
+				process only sets entries to 1; if False, the reverse-diffusion
+				process samples from the Bernoulli posterior as usual
+		"""
+		super().__init__(input_shape, seed)
+
+		self.a = torch.tensor(a).to(DEVICE)
+		self.b = torch.tensor(b).to(DEVICE)
+		self.string = "Bernoulli Zero Diffuser (beta(t) = s((t / %.2f) - %.2f)" \
+			% (a, b)
+		self.reverse_reflect = reverse_reflect
+		
+	def _beta(self, t):
+		"""
+		Computes beta(t), which is the probability of a flip to 0 at time `t`.
+		Arguments:
+			`t`: a B-tensor of times
+		Returns a B-tensor of beta values.
+		"""
+		# Subtract 1 from t: when t = 1, beta(t) = beta_1
+		return torch.sigmoid((t / self.a) - self.b)
+		
+	def _beta_bar(self, t):
+		"""
+		Computes beta-bar(t), which is the probability of a flip to 0 from time
+		0 to time `t` (flip is assuming the bit at time 0 is 1).
+		Arguments:
+			`t`: a B-tensor of times
+		Returns a B-tensor of beta-bar values.
+		"""
+		max_range = torch.arange(1, torch.max(t) + 1, device=DEVICE)
+		betas = self._beta(max_range)  # Shape: maxT
+
+		betas_tiled = torch.tile(betas, (t.shape[0], 1))  # Shape: B x maxT
+		comps = 1 - betas_tiled
+
+		# Anything that ran over a time t, set to 1
+		mask = max_range[None] > t[:, None]
+		comps[mask] = 1
+		
+		# Do the product in log-space and transform back for stability
+		log_prod = torch.sum(torch.log(comps), dim=1)
+		prod = torch.exp(log_prod)
+
+		return 1 - prod
+
+	def forward(self, x0, t, return_posterior=True):
+		"""
+		Runs diffusion process forward given starting point `x0` and a time `t`.
+		Optionally also returns a tensor which represents the posterior of
+		x_{t-1} given xt and/or x0 (e.g. probability, mean, noise, etc.)
+		Arguments:
+			`x0`: a B x `self.input_shape` tensor containing the data at some
+				time points
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+		Returns a B x `self.input_shape` tensor to represent xt. If
+		`return_posterior` is True, then also returns a B x `self.input_shape`
+		tensor which is a parameter of the posterior.
+		"""
+		beta_t = self._inflate_dims(self._beta(t))
+		beta_bar_t = self._inflate_dims(self._beta_bar(t))
+		beta_bar_t_1 = self._inflate_dims(self._beta_bar(t - 1))
+
+		prob_one = x0 * (1 - beta_bar_t)
+		indicators = torch.bernoulli(prob_one)
+
+		# Perform sampling
+		xt = x0.clone()
+		mask = indicators == 0
+		xt[mask] = 0  # Set to 0
+		
+		if return_posterior:
+			term_1 = xt + beta_t - (2 * xt * beta_t)
+			term_2 = x0 * (1 - beta_bar_t_1)
+			term_3 = ((1 - x0) * (1 - xt)) + (x0 * (1 - xt) * beta_bar_t) + \
+				(x0 * xt * (1 - beta_bar_t))
+
+			post = term_1 * term_2 / term_3
+			# Due to small numerical instabilities (particularly at t = 0), clip
+			# the probabilities
+			post = torch.clamp(post, 0, 1) 
+			return xt, post
+		return xt
+
+	def reverse_step(self, xt, t, post):
+		"""
+		Performs a reverse sampling step to compute x_{t-1} given xt and the
+		posterior quantity (or an estimate of it) defined in `posterior`.
+		Arguments:
+			`xt`: a B x `self.input_shape` tensor containing the data at time t
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+			`post`: a B x `self.input_shape` tensor containing the posterior
+				quantity (or a model-predicted estimate of it) as defined in
+				`posterior`
+		Returns a B x `self.input_shape` tensor for x_{t-1}.
+		"""
+		# Ignore xt and t
+		if self.reverse_reflect:
+			xt_1 = xt.clone()
+			indicators = torch.bernoulli(post)
+			xt_1[indicators == 1] = 1  # Only set to 1 when a 1 is sampled
+			return xt_1
+		return torch.bernoulli(post)
+
+	def sample_prior(self, num_samples, t):
+		"""
+		Samples from the prior distribution specified by the diffusion process
+		at time `t`.
+		Arguments:
+			`num_samples`: B, the number of samples to return
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+		Returns a B x `self.input_shape` tensor for the `xt` values that are
+		sampled.
+		"""
+		# Ignore t
+		size = torch.Size([num_samples] + list(self.input_shape))
+		return torch.zeros(size, device=DEVICE)
 	
 	def __str__(self):
 		return self.string

@@ -9,7 +9,7 @@ class GraphLinkPredictor(torch.nn.Module):
 
 	def __init__(
 		self, input_dim, t_limit, num_gnn_layers=4, hidden_dim=10,
-		time_embed_size=256
+		time_embed_size=256, virtual_node=False
 	):
 		"""
 		Initialize a time-dependent GNN which predicts bit probabilities for
@@ -20,6 +20,7 @@ class GraphLinkPredictor(torch.nn.Module):
 			`num_gnn_layers`: number of GNN layers to have
 			`hidden_dim`: the dimension of the hidden node embeddings
 			`time_embed_size`: size of the time embeddings
+			`virtual_node`: if True, include a virtual node in the architecture
 		"""
 		super().__init__()
 		
@@ -30,6 +31,7 @@ class GraphLinkPredictor(torch.nn.Module):
 		
 		self.t_limit = t_limit
 		self.num_gnn_layers = num_gnn_layers
+		self.virtual_node = virtual_node
 		
 		self.time_embed_dense = torch.nn.Linear(3, time_embed_size)
 		
@@ -37,27 +39,31 @@ class GraphLinkPredictor(torch.nn.Module):
 		self.relu = torch.nn.ReLU()
 		
 		# GNN layers
-		num_heads = 4  # Number of attention heads
 		self.gnn_layers = torch.nn.ModuleList()
 		self.gnn_batch_norms = torch.nn.ModuleList()
 		for i in range(num_gnn_layers):
-			gnn_layer = torch_geometric.nn.GATv2Conv(
-				input_dim + time_embed_size if i == 0
-					else hidden_dim * num_heads,
-				hidden_dim, heads=num_heads
+			gnn_nn = torch.nn.Sequential(
+				torch.nn.Linear(
+					input_dim + time_embed_size if i == 0 else hidden_dim,
+					hidden_dim * 2
+				),
+				self.relu,
+				torch.nn.Linear(hidden_dim * 2, hidden_dim)
 			)
-			gnn_batch_norm = torch_geometric.nn.LayerNorm(
-				hidden_dim * num_heads
-			)
+			gnn_layer = torch_geometric.nn.GINConv(gnn_nn, train_eps=True)
+			gnn_batch_norm = torch_geometric.nn.LayerNorm(hidden_dim)
 
 			self.gnn_layers.append(gnn_layer)
 			self.gnn_batch_norms.append(gnn_batch_norm)
-			
+
 		# Link prediction
-		self.link_dense = torch.nn.Linear(hidden_dim * num_heads, 1)
+		self.link_dense = torch.nn.Linear(hidden_dim, 1)
 		
 		# Loss
 		self.bce_loss = torch.nn.BCELoss()
+
+		if virtual_node:
+			self.vn_transform = torch_geometric.transforms.VirtualNode()
 		
 	def forward(self, data, t):
 		"""
@@ -70,6 +76,19 @@ class GraphLinkPredictor(torch.nn.Module):
 		Returns an E-tensor of probabilities of each edge at time t - 1, where E
 		is the total possible number of edges, and is in canonical ordering.
 		"""
+		if self.virtual_node:
+			# Add a virtual node
+			data_copy = data.clone()  # Don't modify the original
+			self.vn_transform(data_copy)  # Modifies `data_copy`
+			# Due to a known issue, we will set the `batch` attribute manually:
+			# https://github.com/pyg-team/pytorch_geometric/issues/5818
+			data_copy.batch = torch.cat([
+				data.batch, torch.max(data.batch)[None]
+			])
+			# Also extend `t` by one entry (use 0, since it doesn't matter)
+			t = torch.cat([t, torch.tensor([0], device=DEVICE)])
+			data = data_copy  # Use our modified Data object
+
 		# Get the time embeddings for `t`
 		time_embed_args = t[:, None] / self.t_limit  # Shape: V x 1
 		time_embed = self.swish(self.time_embed_dense(
