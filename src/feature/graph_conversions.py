@@ -43,7 +43,7 @@ def set_nx_edges(graph, edges):
 def get_nx_node_features(graph):
 	"""
 	Returns a V x D array of the node features of a NetworkX graph in canonical
-	order.  
+	order.
 	Arguments:
 		`graph`: a NetworkX graph
 	"""
@@ -76,10 +76,15 @@ def pyg_data_to_edge_vector(data, return_batch_inds=False):
 	# First, get (padded) adjacency matrix of size B x V x V, where V is
 	# the maximum number of nodes in any individual graph
 	adj_matrix = torch_geometric.utils.to_dense_adj(data.edge_index, data.batch)
+	graph_sizes = torch.diff(data.ptr)
+
+	if torch.max(data.batch) >= len(graph_sizes):
+		# There are more indices in `batch` than there are pointers, so cut off
+		# the excess
+		adj_matrix = adj_matrix[:len(graph_sizes)]
 	
 	# Create boolean mask of only the top upper triangle of each B x V x V
 	# matrix, ignoring the diagonal
-	graph_sizes = torch.diff(data.ptr)
 	triu_mask = torch.triu(torch.ones_like(adj_matrix), diagonal=1) == 1
 	for i, size in enumerate(torch.diff(data.ptr)):
 		# TODO: make this more efficient
@@ -196,3 +201,79 @@ def split_pyg_data_to_nx_graphs(data):
 
 		graphs.append(graph)
 	return graphs
+
+
+def add_virtual_nodes(data):
+	"""
+	Given a torch-geometric Data object, adds a virtual node to each individual
+	graph in the batch. This modifies `data` in place. The attributes are
+	modified as follows:
+		`x`: new row of all 0s added for each virtual node
+		`edge_index`: edges from each virtual node to all other nodes in its
+			graph
+		`batch`: new entry with unique index for each virtual node
+		`edge_type`: introduces new edge type for each edge added
+		`ptr`: unmodified
+	Arguments:
+		`data`: a batched torch-geometric Data object
+	"""
+	# Code adapted from `torch_geometric.transforms.virtual_node.VirtualNode`
+	# We write our own function to make sure we add a distinct virtual node for
+	# each graph in the batch, and in light of the issue here:
+	# https://github.com/pyg-team/pytorch_geometric/issues/5818
+	updates = {
+		"x": [data.x],
+		"edge_index": [data.edge_index],
+		"batch": [data.batch],
+		"edge_type": [
+			data.get("edge_type", torch.zeros_like(data.edge_index[0]))
+		]
+	}
+	if "num_nodes" in data:
+		num_nodes = data.num_nodes
+
+	graph_sizes = torch.diff(data.ptr)
+	num_graphs = len(graph_sizes)
+	device = data.x.device
+
+	new_edge_type = int(torch.max(updates["edge_type"][0])) + 1
+	next_node_i = len(data.x)
+	next_batch_i = num_graphs
+
+	for i in range(num_graphs):
+		start_node_i, end_node_i = data.ptr[i], data.ptr[i + 1]
+		graph_size = graph_sizes[i]
+
+		# New edges
+		new_edges_1 = torch.full((graph_size,), next_node_i, device=device)
+		new_edges_2 = torch.arange(start_node_i, end_node_i, device=device)
+		new_edges = torch.cat([
+			torch.stack([new_edges_1, new_edges_2], dim=0),
+			torch.stack([new_edges_2, new_edges_1], dim=0),
+		], dim=1)
+		updates["edge_index"].append(new_edges)
+
+		new_edge_types_1 = torch.full(
+			new_edges_1.shape, new_edge_type, device=device
+		)
+		new_edge_types_2 = new_edge_types_1 + 1
+		new_edge_types = torch.cat([new_edge_types_1, new_edge_types_2], dim=0)
+		updates["edge_type"].append(new_edge_types)
+
+		# New virtual node
+		new_x = torch.zeros_like(data.x[0])[None]
+		updates["x"].append(new_x)
+		next_node_i = next_node_i + 1
+
+		# New batch
+		new_batch = torch.tensor([next_batch_i], device=device)
+		updates["batch"].append(new_batch)
+		next_batch_i = next_batch_i + 1
+
+	data.edge_index = torch.cat(updates["edge_index"], dim=1)
+	data.edge_type = torch.cat(updates["edge_type"], dim=0)
+	data.x = torch.cat(updates["x"], dim=0)
+	data.batch = torch.cat(updates["batch"], dim=0)
+
+	if "num_nodes" in data:
+		data.num_nodes = num_nodes + num_graphs

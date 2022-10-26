@@ -62,9 +62,6 @@ class GraphLinkPredictor(torch.nn.Module):
 		# Loss
 		self.bce_loss = torch.nn.BCELoss()
 
-		if virtual_node:
-			self.vn_transform = torch_geometric.transforms.VirtualNode()
-		
 	def forward(self, data, t):
 		"""
 		Forward pass of the network.
@@ -79,14 +76,12 @@ class GraphLinkPredictor(torch.nn.Module):
 		if self.virtual_node:
 			# Add a virtual node
 			data_copy = data.clone()  # Don't modify the original
-			self.vn_transform(data_copy)  # Modifies `data_copy`
-			# Due to a known issue, we will set the `batch` attribute manually:
-			# https://github.com/pyg-team/pytorch_geometric/issues/5818
-			data_copy.batch = torch.cat([
-				data.batch, torch.max(data.batch)[None]
+			graph_conversions.add_virtual_nodes(data_copy)  # Modify `data_copy`
+			# Also extend `t` by the number of virtual nodes added (use 0,
+			# since the node is fake)
+			t = torch.cat([
+				t, torch.zeros(len(data.ptr) - 1, device=t.device)
 			])
-			# Also extend `t` by one entry (use 0, since it doesn't matter)
-			t = torch.cat([t, torch.tensor([0], device=DEVICE)])
 			data = data_copy  # Use our modified Data object
 
 		# Get the time embeddings for `t`
