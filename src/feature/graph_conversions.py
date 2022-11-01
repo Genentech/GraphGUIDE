@@ -236,7 +236,10 @@ def add_virtual_nodes(data):
 	num_graphs = len(graph_sizes)
 	device = data.x.device
 
-	new_edge_type = int(torch.max(updates["edge_type"][0])) + 1
+	if not updates["edge_type"][0].numel():
+		new_edge_type = 1
+	else:
+		new_edge_type = int(torch.max(updates["edge_type"][0])) + 1
 	next_node_i = len(data.x)
 	next_batch_i = num_graphs
 

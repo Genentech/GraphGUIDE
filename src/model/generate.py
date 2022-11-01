@@ -135,7 +135,9 @@ def generate_graph_samples(
 		)  # Shape: E
 
 		post = model(xt, t_v)
-		post_edges = diffuser.reverse_step(edges, t_e, post)
+		post_edges = diffuser.reverse_step(
+			edges[:, None], t_e, post[:, None]
+		)[:, 0]  # Do everything on E x 1 tensors, and then squeeze back
 
 		# Make copy of Data object
 		xt = xt.clone()

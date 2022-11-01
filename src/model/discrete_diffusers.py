@@ -303,7 +303,8 @@ class BernoulliDiffuser(DiscreteDiffuser):
 			term_1 = ((1 - xt) * beta_t) + (xt * (1 - beta_t))
 			term_2 = ((1 - x0) * beta_bar_t_1) + (x0 * (1 - beta_bar_t_1))
 			x0_xor_xt = torch.square(x0 - xt)
-			term_3 = (x0_xor_xt * beta_bar_t) + ((1 - x0_xor_xt) * (1 - beta_bar_t))
+			term_3 = (x0_xor_xt * beta_bar_t) + \
+				((1 - x0_xor_xt) * (1 - beta_bar_t))
 
 			post = term_1 * term_2 / term_3
 			# Due to small numerical instabilities (particularly at t = 0), clip
@@ -616,6 +617,78 @@ class BernoulliZeroDiffuser(DiscreteDiffuser):
 	
 	def __str__(self):
 		return self.string
+
+
+class BernoulliSkipDiffuser(BernoulliDiffuser):
+	# Diffuser which flips bits in the inputs, but the posterior and reverse
+	# step are directly just probabilities of the original
+	def forward(self, x0, t, return_posterior=True):
+		"""
+		Runs diffusion process forward given starting point `x0` and a time `t`.
+		Optionally also returns a tensor which represents the posterior of
+		x_{t-1} given xt and/or x0 (e.g. probability, mean, noise, etc.)
+		Arguments:
+			`x0`: a B x `self.input_shape` tensor containing the data at some
+				time points
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+		Returns a B x `self.input_shape` tensor to represent xt. If
+		`return_posterior` is True, then also returns a B x `self.input_shape`
+		tensor which is a parameter of the posterior.
+		"""
+		beta_bar_t = self._inflate_dims(self._beta_bar(t))
+		prob_flip = torch.tile(beta_bar_t, (1, *x0.shape[1:]))
+		indicators = torch.bernoulli(prob_flip)
+
+		# Perform flips
+		xt = x0.clone()
+		mask = indicators == 1
+		xt[mask] = 1 - x0[mask]
+		
+		if return_posterior:
+			return xt, x0  # Here, our "posterior" is just x0
+		return xt
+
+	def reverse_step(self, xt, t, post):
+		"""
+		Performs a reverse sampling step to compute x_{t-1} given xt and the
+		posterior quantity (or an estimate of it) defined in `posterior`.
+		Arguments:
+			`xt`: a B x `self.input_shape` tensor containing the data at time t
+			`t`: a B-tensor containing the time in the diffusion process for
+				each input
+			`post`: a B x `self.input_shape` tensor containing the posterior
+				quantity (or a model-predicted estimate of it) as defined in
+				`posterior`
+		Returns a B x `self.input_shape` tensor for x_{t-1}.
+		"""
+		last_step_mask = None
+		if not torch.all(t > 1):
+			last_step_mask = t == 1
+
+		x0 = torch.bernoulli(post)
+		# In this case, what we're calling the "posterior" is just x0
+
+		beta_t = self._inflate_dims(self._beta(t))
+		beta_bar_t = self._inflate_dims(self._beta_bar(t))
+		beta_bar_t_1 = self._inflate_dims(self._beta_bar(t - 1))
+
+		term_1 = ((1 - xt) * beta_t) + (xt * (1 - beta_t))
+		term_2 = ((1 - x0) * beta_bar_t_1) + (x0 * (1 - beta_bar_t_1))
+		x0_xor_xt = torch.square(x0 - xt)
+		term_3 = (x0_xor_xt * beta_bar_t) + ((1 - x0_xor_xt) * (1 - beta_bar_t))
+
+		posterior = term_1 * term_2 / term_3  # p(x_{t-1} = 1 | xt, x0)
+		# Due to small numerical instabilities (particularly at t = 0), clip
+		# the probabilities
+		posterior = torch.clamp(posterior, 0, 1)
+		xt_1 = torch.bernoulli(posterior)
+
+		if last_step_mask is not None:
+			# For the last step, don't do this posterior calculation; just use
+			# the x0 we are given
+			xt_1[last_step_mask] = x0[last_step_mask]
+		return xt_1
 
 
 if __name__ == "__main__":

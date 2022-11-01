@@ -96,6 +96,7 @@ def create_random_uniform_cliques(
 		
 	return g
 
+
 def create_random_diverse_cliques(
 	num_nodes, node_dim, clique_sizes=[3, 4, 5], repeat=False, noise_level=1
 ):
@@ -150,6 +151,37 @@ def create_random_diverse_cliques(
 	return g
 
 
+def create_random_er_degree_graph(
+	num_nodes, node_dim, edge_prob=0.2, noise_level=1
+):
+	"""
+	Creates a random Erdos-Renyi graph where the node attributes are a constant
+	vector of the degree of the node, plus some noise.
+	Arguments:
+		`num_nodes`: number of nodes in the graph
+		`node_dim`: size of node feature vector
+		`edge_prob`: probability of edges in Erdos-Renyi graph
+		`noise_level`: standard deviation of Gaussian noise to add to node
+			features
+	Returns a NetworkX Graph with NumPy arrays as node attributes.
+	"""
+	g = nx.erdos_renyi_graph(num_nodes, edge_prob)
+
+	degrees = dict(g.degree())
+	node_features = np.tile(
+		np.array([degrees[n] for n in range(len(g))])[:, None],
+		(1, node_dim)
+	)
+	node_features = node_features + \
+		(np.random.randn(num_nodes, node_dim) * noise_level)
+
+	nx.set_node_attributes(
+		g, {i : node_features[i] for i in range(num_nodes)}, "feats"
+	)
+
+	return g
+
+
 class RandomGraphDataset(torch.utils.data.Dataset):
 	def __init__(
 		self, num_nodes, node_dim, graph_type="tree", num_items=1000,
@@ -163,7 +195,7 @@ class RandomGraphDataset(torch.utils.data.Dataset):
 			`node_dim`: size of node feature vector
 			`num_items`: number of items to yield in an epoch
 			`graph_type`: type of graph to generate; can be "tree",
-				"uniform_cliques", or "diverse_cliques"
+				"uniform_cliques", "diverse_cliques", or "degree_graph"
 			`kwargs`: extra keyword arguments for the graph generator
 		"""
 		super().__init__()
@@ -193,6 +225,11 @@ class RandomGraphDataset(torch.utils.data.Dataset):
 			graph = create_random_diverse_cliques(
 				num_nodes, self.node_dim, **self.kwargs
 			)
+		elif self.graph_type == "degree_graph":
+			graph = create_random_er_degree_graph(
+				num_nodes, self.node_dim, **self.kwargs
+			)
+
 		data = torch_geometric.utils.from_networkx(
 			graph, group_node_attrs=["feats"]
 		)
