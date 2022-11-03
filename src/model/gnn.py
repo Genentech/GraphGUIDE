@@ -162,7 +162,7 @@ class GraphAttentionLayer(torch.nn.Module):
 
 	def forward(self, x, edge_index):
 		gat_out = self.gat(x, edge_index)
-		x_drop_1 = self.dropout_1(x)
+		x_drop_1 = self.dropout_1(gat_out)
 		x_out_1 = self.norm_1(x + x_drop_1)
 
 		x_out_2 = self.dropout_2(self.relu(self.dense_2(x_out_1)))
