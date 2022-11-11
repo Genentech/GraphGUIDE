@@ -2,6 +2,7 @@ import torch
 import torch_geometric
 import numpy as np
 import networkx as nx
+import scipy.spatial
 
 # Define device
 if torch.cuda.is_available():
@@ -10,17 +11,20 @@ else:
 	DEVICE = "cpu"
 
 
-def create_random_tree(num_nodes, node_dim, noise_level=1):
+def create_tree(node_dim, num_nodes=10, noise_level=1):
 	"""
 	Creates a random connected tree. The node attributes will be initialized by
 	a random vector plus the distance from a randomly selected source node, plus
 	noise.
 	Arguments:
-		`num_nodes`: number of nodes in the graph
 		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
 		`noise_level`: standard deviation of Gaussian noise to add to distances
 	Returns a NetworkX Graph with NumPy arrays as node attributes.
 	"""
+	if type(num_nodes) is not int:
+		num_nodes = np.random.choice(num_nodes)
+
 	g = nx.random_tree(num_nodes)
 
 	node_features = np.empty((num_nodes, node_dim))
@@ -56,21 +60,24 @@ def create_random_tree(num_nodes, node_dim, noise_level=1):
 	return g
 
 
-def create_random_uniform_cliques(
-	num_nodes, node_dim, clique_size=6, noise_level=1
+def create_uniform_cliques(
+	node_dim, num_nodes=10, clique_size=6, noise_level=1
 ):
 	"""
 	Creates a random graph of disconnected cliques. The node attributes will be
 	initialized by a constant vector for each clique, plus some noise. If
 	`clique_size` does not divide `num_nodes`, there will be a smaller clique.
 	Arguments:
-		`num_nodes`: number of nodes in the graph
 		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
 		`clique_size`: size of cliques
 		`noise_level`: standard deviation of Gaussian noise to add to node
 			features
 	Returns a NetworkX Graph with NumPy arrays as node attributes.
 	"""
+	if type(num_nodes) is not int:
+		num_nodes = np.random.choice(num_nodes)
+
 	g = nx.empty_graph()
 	
 	clique_count = 0
@@ -97,22 +104,25 @@ def create_random_uniform_cliques(
 	return g
 
 
-def create_random_diverse_cliques(
-	num_nodes, node_dim, clique_sizes=[3, 4, 5], repeat=False, noise_level=1
+def create_diverse_cliques(
+	node_dim, num_nodes=10, clique_sizes=[3, 4, 5], repeat=False, noise_level=1
 ):
 	"""
 	Creates a random graph of disconnected cliques. The node attributes will be
 	initialized by a constant vector for each clique (which is the size of the
 	clique), plus some noise. Leftover nodes will be singleton nodes.
 	Arguments:
-		`num_nodes`: number of nodes in the graph
 		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
 		`clique_sizes`: iterable of clique sizes to use
 		`repeat`: if False, all clique sizes will be unique
 		`noise_level`: standard deviation of Gaussian noise to add to node
 			features
 	Returns a NetworkX Graph with NumPy arrays as node attributes.
 	"""
+	if type(num_nodes) is not int:
+		num_nodes = np.random.choice(num_nodes)
+
 	g = nx.empty_graph()
 	
 	clique_sizes = np.unique(clique_sizes)
@@ -151,20 +161,23 @@ def create_random_diverse_cliques(
 	return g
 
 
-def create_random_er_degree_graph(
-	num_nodes, node_dim, edge_prob=0.2, noise_level=1
+def create_degree_graph(
+	node_dim, num_nodes=10, edge_prob=0.2, noise_level=1
 ):
 	"""
 	Creates a random Erdos-Renyi graph where the node attributes are a constant
 	vector of the degree of the node, plus some noise.
 	Arguments:
-		`num_nodes`: number of nodes in the graph
 		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
 		`edge_prob`: probability of edges in Erdos-Renyi graph
 		`noise_level`: standard deviation of Gaussian noise to add to node
 			features
 	Returns a NetworkX Graph with NumPy arrays as node attributes.
 	"""
+	if type(num_nodes) is not int:
+		num_nodes = np.random.choice(num_nodes)
+
 	g = nx.erdos_renyi_graph(num_nodes, edge_prob)
 
 	degrees = dict(g.degree())
@@ -182,28 +195,144 @@ def create_random_er_degree_graph(
 	return g
 
 
+def create_planar_graph(node_dim, num_nodes=64):
+	"""
+	Creates a planar graph using the Delaunay triangulation algorithm.
+	All nodes will be given a feature vector of all 1s.
+	Arguments:
+		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
+	Returns a NetworkX Graph with NumPy arrays as node attributes.
+	"""
+	if type(num_nodes) is not int:
+		num_nodes = np.random.choice(num_nodes)
+
+	# Sample points uniformly at random from unit square
+	points = np.random.rand(num_nodes, 2)
+
+	# Perform Delaunay triangulation
+	tri = scipy.spatial.Delaunay(points)
+
+	# Create graph and add edges from triangulation result
+	g = nx.empty_graph(num_nodes)
+	indptr, indices = tri.vertex_neighbor_vertices
+	for i in range(num_nodes):
+		for j in indices[indptr[i]:indptr[i + 1]]:
+			g.add_edge(i, j)
+			
+	nx.set_node_attributes(
+		g, {i : np.ones(node_dim) for i in range(num_nodes)}, "feats"
+	)
+	
+	return g
+
+
+def create_community_graph(
+	node_dim, num_nodes=np.arange(12, 21), num_comms=2,
+	intra_comm_edge_prob=0.3, inter_comm_edge_frac=0.05
+):
+	"""
+	Creates a community graph following this paper:
+	https://arxiv.org/abs/1802.08773
+	The default values give the definition of a "community-small" graph in the
+	above paper. Each community is a Erdos-Renyi graph, with a certain set
+	number of edges connecting the communities sparsely (drawn uniformly).
+	All nodes will be given a feature vector of all 1s.
+	Arguments:
+		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
+		`num_comms`: number of communities to create
+		`intra_comm_edge_prob`: probability of edge in Erdos-Renyi graph for
+			each community
+		`inter_comm_edge_frac`: number of edges to draw between each pair of
+			communities, as a fraction of `num_nodes`; edges are drawn uniformly
+			at random between communities
+	Returns a NetworkX Graph with NumPy arrays as node attributes.
+	"""
+	if type(num_nodes) is not int:
+		num_nodes = np.random.choice(num_nodes)
+
+	# Create communities
+	exp_size = int(num_nodes / num_comms)
+	comm_sizes = []
+	total_size = 0
+	g = nx.empty_graph()
+	while total_size < num_nodes:
+		size = min(exp_size, num_nodes - total_size)
+		g = nx.disjoint_union(
+			g, nx.erdos_renyi_graph(size, intra_comm_edge_prob)
+		)
+		comm_sizes.append(size)
+		total_size += size
+	
+	# Link together communities
+	node_inds = np.cumsum(comm_sizes)
+	num_inter_edges = int(num_nodes * inter_comm_edge_frac)
+	for i in range(num_comms):
+		for j in range(i):
+			i_nodes = np.arange(node_inds[i - 1] if i else 0, node_inds[i])
+			j_nodes = np.arange(node_inds[j - 1] if j else 0, node_inds[j])
+			for _ in range(num_inter_edges):
+				g.add_edge(
+					np.random.choice(i_nodes), np.random.choice(j_nodes)
+				)
+				
+	nx.set_node_attributes(
+		g, {i : np.ones(node_dim) for i in range(num_nodes)}, "feats"
+	)
+	
+	return g
+
+
+def create_sbm_graph(
+	node_dim, num_blocks_arr=np.arange(2, 6), block_size_arr=np.arange(20, 41),
+	intra_block_edge_prob=0.3, inter_block_edge_prob=0.05
+):
+	"""
+	Creates a stochastic-block-model graph, where the number of blocks and size
+	of blocks is drawn randomly.
+	All nodes will be given a feature vector of all 1s.
+	Arguments:
+		`node_dim`: size of node feature vector
+		`num_blocks_arr`: iterable containing possible numbers of blocks to have
+			(selected uniformly)
+		`block_size_arr`: iterable containing possible block sizes for each
+			block (selected uniformly per block)
+		`intra_block_edge_prob`: probability of edge within blocks
+		`inter_block_edge_prob`: probability of edge between blocks
+	Returns a NetworkX Graph with NumPy arrays as node attributes.
+	"""
+	num_blocks = np.random.choice(num_blocks_arr)
+	block_sizes = np.random.choice(block_size_arr, num_blocks, replace=True)
+	
+	# Create matrix of edge probabilities between blocks
+	p = np.full((len(block_sizes), len(block_sizes)), inter_block_edge_prob)
+	np.fill_diagonal(p, intra_block_edge_prob)
+	
+	# Create SBM graph
+	g = nx.stochastic_block_model(block_sizes, p)
+	
+	nx.set_node_attributes(
+		g, {i : np.ones(node_dim) for i in range(num_nodes)}, "feats"
+	)
+	
+	return g
+
+
 class RandomGraphDataset(torch.utils.data.Dataset):
-	def __init__(
-		self, num_nodes, node_dim, graph_type="tree", num_items=1000,
-		**kwargs
-	):
+	def __init__(self, node_dim, graph_type="tree", num_items=1000, **kwargs):
 		"""
 		Create a PyTorch IterableDataset which yields random graphs.
 		Arguments:
-			`num_nodes`: number of nodes in the graph; can be an integer or a
-				NumPy array of integers to sample from uniformly
 			`node_dim`: size of node feature vector
 			`num_items`: number of items to yield in an epoch
 			`graph_type`: type of graph to generate; can be "tree",
-				"uniform_cliques", "diverse_cliques", or "degree_graph"
+				"uniform_cliques", "diverse_cliques", "degree", "planar",
+				"community", or "sbm"
 			`kwargs`: extra keyword arguments for the graph generator
 		"""
 		super().__init__()
 		
-		if type(num_nodes) is int:
-			num_nodes = np.array([num_nodes])
-			
-		self.num_nodes = num_nodes
 		self.node_dim = node_dim
 		self.num_items = num_items
 		self.graph_type = graph_type
@@ -214,22 +343,26 @@ class RandomGraphDataset(torch.utils.data.Dataset):
 		Returns a single data point generated randomly, as a torch-geometric
 		Data object. `index` is ignored.
 		"""
-		num_nodes = np.random.choice(self.num_nodes)
 		if self.graph_type == "tree":
-			graph = create_random_tree(num_nodes, self.node_dim, **self.kwargs)
+			graph_creater = create_tree
 		elif self.graph_type == "uniform_cliques":
-			graph = create_random_uniform_cliques(
-				num_nodes, self.node_dim, **self.kwargs
-			)
+			graph_creater = create_uniform_cliques
 		elif self.graph_type == "diverse_cliques":
-			graph = create_random_diverse_cliques(
-				num_nodes, self.node_dim, **self.kwargs
-			)
-		elif self.graph_type == "degree_graph":
-			graph = create_random_er_degree_graph(
-				num_nodes, self.node_dim, **self.kwargs
+			graph_creater = create_diverse_cliques
+		elif self.graph_type == "degree":
+			graph_creater = create_degree_graph
+		elif self.graph_type == "planar":
+			graph_creater = create_planar_graph
+		elif self.graph_type == "community":
+			graph_creater = create_community_graph
+		elif self.graph_type == "sbm":
+			graph_creater = create_sbm_graph
+		else:
+			raise ValueError(
+				"Unrecognize random graph type: %s" % self.graph_type
 			)
 
+		graph = graph_creater(self.node_dim, **self.kwargs)
 		data = torch_geometric.utils.from_networkx(
 			graph, group_node_attrs=["feats"]
 		)
@@ -241,13 +374,14 @@ class RandomGraphDataset(torch.utils.data.Dataset):
 
 
 if __name__ == "__main__":
-	num_nodes, node_dim = 10, 5
+	node_dim = 5
 
 	dataset = RandomGraphDataset(
-	    num_nodes, node_dim, num_items=100,
-	    graph_type="diverse_cliques", clique_sizes=[3, 4, 5, 6], noise_level=0
+		node_dim, num_items=100,
+		graph_type="diverse_cliques", num_nodes=np.arange(10, 20),
+		clique_sizes=[3, 4, 5, 6], noise_level=0
 	)
 	data_loader = torch_geometric.loader.DataLoader(
-	    dataset, batch_size=32, shuffle=False
+		dataset, batch_size=32, shuffle=False
 	)
 	batch = next(iter(data_loader))

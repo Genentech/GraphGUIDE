@@ -225,7 +225,7 @@ class GraphLinkGAT(torch.nn.Module):
 
 	def __init__(
 		self, input_dim, t_limit, num_gnn_layers=4, gat_num_heads=8,
-		gat_hidden_dim=32, hidden_dim=256, time_embed_size=256, spectrum_dim=10,
+		gat_hidden_dim=32, hidden_dim=256, time_embed_size=256, spectrum_dim=5,
 		epsilon=1e-6
 	):
 		"""
@@ -336,7 +336,7 @@ class GraphLinkGAT(torch.nn.Module):
 		sqrt_deg = 1 / torch.sqrt(deg + self.epsilon)
 		sqrt_deg_mat = torch.diag_embed(sqrt_deg)
 		
-		identity = torch.eye(adj_mat.size(1))[None]
+		identity = torch.eye(adj_mat.size(1), device=adj_mat.device)[None]
 		laplacian = identity - \
 			torch.matmul(torch.matmul(sqrt_deg_mat, adj_mat), sqrt_deg_mat)
 
@@ -352,7 +352,7 @@ class GraphLinkGAT(torch.nn.Module):
 			)
 			# Limit the eigenvectors to the smallest eigenvalues if needed
 			if self.spectrum_dim < graph_size:
-				evecs = evecs[:, self.spectrum_dim]
+				evecs = evecs[:, :self.spectrum_dim]
 			spectrum_mats.append(evecs)
 
 		# GNN layers
