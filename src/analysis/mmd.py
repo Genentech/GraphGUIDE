@@ -18,8 +18,8 @@ def make_histograms(
 		`bin_array`: if given, make the histograms according to this NumPy array
 			of bin edges
 		`frequency`: if True, normalize each histogram into frequencies
-		`epsilon`: small number for stability of last endpoint if `num_bins` or
-			`bin_width` are specified
+		`epsilon`: small number for stability of last endpoint if `bin_width` is
+			specified
 	Returns an N x B array of counts or frequencies (N is parallel to the input
 	`value_arrs`), where B is the number of bins in the histograms.
 	"""
@@ -27,12 +27,13 @@ def make_histograms(
 	if num_bins is not None:
 		assert bin_width is None and bin_array is None
 		min_val = min(np.nanmin(arr) for arr in value_arrs)
-		max_val = max(np.nanmax(arr) for arr in value_arrs) + epsilon
-		bin_array = np.linspace(min_val, max_val, num_bins)	
+		max_val = max(np.nanmax(arr) for arr in value_arrs)
+		bin_array = np.linspace(min_val, max_val, num_bins + 1)
 	elif bin_width is not None:
 		assert num_bins is None and bin_array is None
 		min_val = min(np.nanmin(arr) for arr in value_arrs)
-		max_val = max(np.nanmax(arr) for arr in value_arrs) + epsilon
+		max_val = max(np.nanmax(arr) for arr in value_arrs) + bin_width + \
+			epsilon
 		bin_array = np.arange(min_val, max_val, bin_width)
 	elif bin_array is not None:
 		assert num_bins is None and bin_width is None
@@ -63,7 +64,8 @@ def gaussian_kernel(vec_1, vec_2, sigma=1):
 		`sigma`: standard deviation for the Gaussian kernel
 	Returns a scalar similarity value between 0 and 1.
 	"""
-	return np.exp(-np.sum(np.square(vec_1 - vec_2)) / (2 * sigma * sigma))
+	l2_dist_squared = np.sum(np.square(vec_1 - vec_2))
+	return np.exp(-l2_dist_squared / (2 * sigma * sigma))
 
 
 def gaussian_wasserstein_kernel(vec_1, vec_2, sigma=1):
@@ -108,7 +110,8 @@ def gaussian_total_variation_kernel(vec_1, vec_2, sigma=1):
 		`sigma`: standard deviation for the Gaussian kernel
 	Returns a scalar similarity value between 0 and 1.
 	"""
-	return np.exp(-np.sum(np.abs(vec_1 - vec_2)) / (2 * sigma * sigma))
+	tv_dist = np.sum(np.abs(vec_1 - vec_2)) / 2
+	return np.exp(-(tv_dist * tv_dist) / (2 * sigma * sigma))
 
 
 def compute_inner_prod_feature_mean(dist_1, dist_2, kernel_type, **kwargs):
@@ -150,7 +153,9 @@ def compute_inner_prod_feature_mean(dist_1, dist_2, kernel_type, **kwargs):
 	return np.mean(inner_prods)
 
 
-def compute_maximum_mean_discrepancy(dist_1, dist_2, kernel_type, **kwargs):
+def compute_maximum_mean_discrepancy(
+	dist_1, dist_2, kernel_type, normalize=True, **kwargs
+):
 	"""
 	Given two empirical distributions of vectors, computes the maximum mean
 	discrepancy (MMD) between the two distributions.
@@ -166,9 +171,14 @@ def compute_maximum_mean_discrepancy(dist_1, dist_2, kernel_type, **kwargs):
 		`kernel_type`: type of kernel to apply for computing the kernelized
 			inner product; can be "gaussian", "gaussian_wasserstein", or
 			"gaussian_total_variation"
+		`normalize`: if True, normalize each D-vector to sum to 1
 		`kwargs`: extra keyword arguments to be passed to the kernel function
 	Returns the scalar MMD value.
 	"""
+	if normalize:
+		dist_1 = dist_1 / np.sum(dist_1, axis=1, keepdims=True)
+		dist_2 = dist_2 / np.sum(dist_2, axis=1, keepdims=True)
+
 	term_1 = compute_inner_prod_feature_mean(
 		dist_1, dist_1, kernel_type, **kwargs
 	)
@@ -189,10 +199,14 @@ if __name__ == "__main__":
 		nx.erdos_renyi_graph(
 			np.random.choice(np.arange(10, 20)),
 			np.random.choice(np.linspace(0, 1, 10))
-		)
-		for _ in range(100)
+		) for _ in range(50)
+	] + [
+		nx.erdos_renyi_graph(
+			np.random.choice(np.arange(10, 20)),
+			np.random.choice(np.linspace(0, 1, 10))
+		) for _ in range(50)
 	]
-
+	
 	degrees = graph_metrics.get_degrees(graphs)
 	cluster_coefs = graph_metrics.get_clustering_coefficients(graphs)
 	spectra = graph_metrics.get_spectra(graphs)
@@ -200,9 +214,9 @@ if __name__ == "__main__":
 	orbit_counts = np.stack([
 		np.mean(counts, axis=0) for counts in orbit_counts
 	])
-
-	kernel_type = "gaussian_wasserstein"
-
+	
+	kernel_type = "gaussian_total_variation"
+	
 	degree_hists = make_histograms(degrees, bin_width=1)
 	degree_mmd = compute_maximum_mean_discrepancy(
 		degree_hists[:50], degree_hists[50:], kernel_type, sigma=1
@@ -212,17 +226,18 @@ if __name__ == "__main__":
 		cluster_coef_hists[:50], cluster_coef_hists[50:], kernel_type, sigma=0.1
 	)
 	spectra_hists = make_histograms(
-		spectra, bin_array=np.linspace(-1e-5, 2, 200)
+		spectra, bin_array=np.linspace(-1e-5, 2, 200 + 1)
 	)
 	spectra_mmd = compute_maximum_mean_discrepancy(
 		spectra_hists[:50], spectra_hists[50:], kernel_type, sigma=1
 	)
 	orbit_mmd = compute_maximum_mean_discrepancy(
-		orbit_counts[:50], orbit_counts[50:], kernel_type, sigma=30
+		orbit_counts[:50], orbit_counts[50:], kernel_type, normalize=False,
+		sigma=30
 	)
-
+	
 	print("MMD values")
-	print("Degree: %.4f" % degree_mmd)
-	print("Clustering coefficient: %.4f" % cluster_coef_mmd)
-	print("Spectrum: %.4f" % spectra_mmd)
-	print("Orbit: %.4f" % orbit_mmd)
+	print("Degree: %.15f" % np.square(degree_mmd))
+	print("Clustering coefficient: %.15f" % np.square(cluster_coef_mmd))
+	print("Spectrum: %.15f" % np.square(spectra_mmd))
+	print("Orbit: %.15f" % np.square(orbit_mmd))

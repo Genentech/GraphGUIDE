@@ -304,6 +304,7 @@ def create_sbm_graph(
 	"""
 	num_blocks = np.random.choice(num_blocks_arr)
 	block_sizes = np.random.choice(block_size_arr, num_blocks, replace=True)
+	num_nodes = np.sum(block_sizes)
 	
 	# Create matrix of edge probabilities between blocks
 	p = np.full((len(block_sizes), len(block_sizes)), inter_block_edge_prob)
@@ -315,6 +316,11 @@ def create_sbm_graph(
 	nx.set_node_attributes(
 		g, {i : np.ones(node_dim) for i in range(num_nodes)}, "feats"
 	)
+
+	# Delete these two attributes, or else conversion to PyTorch Geometric Data
+	# object will fail
+	del g.graph["partition"]
+	del g.graph["name"]
 	
 	return g
 
