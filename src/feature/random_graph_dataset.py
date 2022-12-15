@@ -105,7 +105,8 @@ def create_uniform_cliques(
 
 
 def create_diverse_cliques(
-	node_dim, num_nodes=10, clique_sizes=[3, 4, 5], repeat=False, noise_level=1
+	node_dim, num_nodes=10, clique_sizes=[3, 4, 5], repeat=False, noise_level=1,
+	unity_features=False
 ):
 	"""
 	Creates a random graph of disconnected cliques. The node attributes will be
@@ -118,6 +119,7 @@ def create_diverse_cliques(
 		`repeat`: if False, all clique sizes will be unique
 		`noise_level`: standard deviation of Gaussian noise to add to node
 			features
+		`unity_features`: if True, use 1 for all features instead of clique size
 	Returns a NetworkX Graph with NumPy arrays as node attributes.
 	"""
 	if type(num_nodes) is not int:
@@ -147,7 +149,7 @@ def create_diverse_cliques(
 		clique = nx.complete_graph(size)
 		
 		# Create the core feature vector for the clique
-		core = np.ones((size, 1)) * size
+		core = np.ones((size, 1)) * (1 if unity_features else size)
 		
 		# Add a small bit of noise to for each node in the clique
 		node_features = core + (np.random.randn(size, node_dim) * noise_level)
@@ -326,49 +328,61 @@ def create_sbm_graph(
 
 
 class RandomGraphDataset(torch.utils.data.Dataset):
-	def __init__(self, node_dim, graph_type="tree", num_items=1000, **kwargs):
+	def __init__(
+		self, node_dim, graph_type="tree", num_items=1000, static=False,
+		**kwargs
+	):
 		"""
 		Create a PyTorch IterableDataset which yields random graphs.
 		Arguments:
 			`node_dim`: size of node feature vector
-			`num_items`: number of items to yield in an epoch
 			`graph_type`: type of graph to generate; can be "tree",
 				"uniform_cliques", "diverse_cliques", "degree", "planar",
 				"community", or "sbm"
+			`num_items`: number of items to yield in an epoch
+			`static`: if True, generate `num_items` graphs initially and only
+				yield pregenerated graphs
 			`kwargs`: extra keyword arguments for the graph generator
 		"""
 		super().__init__()
 		
 		self.node_dim = node_dim
 		self.num_items = num_items
-		self.graph_type = graph_type
+		self.static = static
 		self.kwargs = kwargs
+
+		if graph_type == "tree":
+			self.graph_creater = create_tree
+		elif graph_type == "uniform_cliques":
+			self.graph_creater = create_uniform_cliques
+		elif graph_type == "diverse_cliques":
+			self.graph_creater = create_diverse_cliques
+		elif graph_type == "degree":
+			self.graph_creater = create_degree_graph
+		elif graph_type == "planar":
+			self.graph_creater = create_planar_graph
+		elif graph_type == "community":
+			self.graph_creater = create_community_graph
+		elif graph_type == "sbm":
+			self.graph_creater = create_sbm_graph
+		else:
+			raise ValueError("Unrecognize random graph type: %s" % graph_type)
+
+		if static:
+			self.graph_cache = [
+				self.graph_creater(node_dim, **kwargs) for _ in range(num_items)
+			]
+
 
 	def __getitem__(self, index):
 		"""
 		Returns a single data point generated randomly, as a torch-geometric
 		Data object. `index` is ignored.
 		"""
-		if self.graph_type == "tree":
-			graph_creater = create_tree
-		elif self.graph_type == "uniform_cliques":
-			graph_creater = create_uniform_cliques
-		elif self.graph_type == "diverse_cliques":
-			graph_creater = create_diverse_cliques
-		elif self.graph_type == "degree":
-			graph_creater = create_degree_graph
-		elif self.graph_type == "planar":
-			graph_creater = create_planar_graph
-		elif self.graph_type == "community":
-			graph_creater = create_community_graph
-		elif self.graph_type == "sbm":
-			graph_creater = create_sbm_graph
+		if self.static:
+			graph = self.graph_cache[index]
 		else:
-			raise ValueError(
-				"Unrecognize random graph type: %s" % self.graph_type
-			)
-
-		graph = graph_creater(self.node_dim, **self.kwargs)
+			graph = self.graph_creater(self.node_dim, **self.kwargs)
 		data = torch_geometric.utils.from_networkx(
 			graph, group_node_attrs=["feats"]
 		)
