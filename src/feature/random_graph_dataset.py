@@ -327,6 +327,92 @@ def create_sbm_graph(
 	return g
 
 
+def create_molecule_like_graph(
+	node_dim, num_nodes=10, backbone_size_range=(4, 6),
+	ornament_size_range=(0, 4), ring_prob=0.5
+):
+	"""
+	Creates a random graph that looks a bit like a molecule. There are two types
+	of nodes: backbone nodes (with node features of 0s) and ornamental nodes
+	(with node features of 1s). Leftover nodes will be either backbone or
+	ornamental nodes (selected uniformly at random). The backbone may be cyclic.
+	Each backbone node can be connected to at most 4 other nodes (other backbone
+	nodes or ornamental nodes).
+	Arguments:
+		`node_dim`: size of node feature vector
+		`num_nodes`: number of nodes in the graph, or an array to sample from
+		`backbone_size_range`: pair of minimum and maximum sizes of backbones to
+			choose from
+		`ornament_size_range`: pair of minimum and maximum number of ornaments
+			to choose from; the actual number of ornaments added may be smaller
+			if the backbone selected is too small
+		`ring_prob`: probability of generating a ring for the backbone
+	Returns a NetworkX Graph with NumPy arrays as node attributes.
+	"""
+	if type(num_nodes) is not int:
+		assert np.max(num_nodes) >= \
+			backbone_size_range[1] + ornament_size_range[1]
+		num_nodes = np.random.choice(num_nodes)
+	else:
+		assert num_nodes >= backbone_size_range[1] + ornament_size_range[1]
+
+	backbone_size = np.random.randint(
+		backbone_size_range[0], backbone_size_range[1] + 1
+	)
+	ornament_size = np.random.randint(
+		ornament_size_range[0],
+		min(ornament_size_range[1], (backbone_size * 2) + 2) + 1
+	)
+	ring = np.random.random() <= ring_prob
+
+	# Create backbone
+	if ring:
+		g = nx.circulant_graph(backbone_size, [1])
+	else:
+		g = nx.empty_graph()
+		g.add_node(0)
+		for _ in range(backbone_size - 1):
+			# Add leaf node to randomly selected node with degree < 4
+			degrees = g.degree()
+			connector = np.random.choice(
+				[i for i in range(len(g)) if degrees[i] < 4]
+			)
+			new_node = len(g)
+			g.add_node(new_node)
+			g.add_edge(new_node, connector)
+
+	# Add ornaments	
+	capacities = [(n, 4 - m) for n, m in g.degree() if m < 4]
+	inds, counts = zip(*capacities)
+	node_arr = np.repeat(inds, counts)
+	connectors = np.random.choice(node_arr, size=ornament_size, replace=False)
+	for connector in connectors:
+		new_node = len(g)
+		g.add_node(new_node)
+		g.add_edge(new_node, connector)
+
+	# Add extra singleton nodes
+	extra_nodes = num_nodes - len(g)
+	extra_backbone_size = extra_nodes // 2
+	extra_ornament_size = extra_nodes - extra_backbone_size
+	for _ in range(extra_backbone_size):
+		g.add_node(len(g))
+	for _ in range(extra_ornament_size):
+		g.add_node(len(g))
+
+	node_features = np.concatenate([
+		np.zeros((backbone_size, node_dim)),
+		np.ones((ornament_size, node_dim)),
+		np.zeros((extra_backbone_size, node_dim)),
+		np.ones((extra_ornament_size, node_dim))
+	], axis=0)
+
+	nx.set_node_attributes(
+		g, {i : node_features[i] for i in range(len(g))}, "feats"
+	)
+	return g
+
+
 class RandomGraphDataset(torch.utils.data.Dataset):
 	def __init__(
 		self, node_dim, graph_type="tree", num_items=1000, static=False,
@@ -365,6 +451,8 @@ class RandomGraphDataset(torch.utils.data.Dataset):
 			self.graph_creater = create_community_graph
 		elif graph_type == "sbm":
 			self.graph_creater = create_sbm_graph
+		elif graph_type == "molecule_like":
+			self.graph_creater = create_molecule_like_graph
 		else:
 			raise ValueError("Unrecognize random graph type: %s" % graph_type)
 
