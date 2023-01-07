@@ -5,6 +5,10 @@ import os
 import sacred
 import model.util as util
 import feature.graph_conversions as graph_conversions
+import model.generate as generate
+import analysis.graph_metrics as graph_metrics
+import analysis.mmd as mmd
+
 
 MODEL_DIR = os.environ.get(
 	"MODEL_DIR",
@@ -114,7 +118,8 @@ def train_model(
 
 @train_ex.command
 def train_graph_model(
-	model, diffuser, data_loader, num_epochs, learning_rate, _run, t_limit=1000
+	model, diffuser, data_loader, num_epochs, learning_rate, _run, t_limit=1000,
+	compute_mmd=False, val_data_loader=None, mmd_sample_size=200
 ):
 	"""
 	Trains a diffusion model on graphs using the given instantiated model and
@@ -130,6 +135,11 @@ def train_graph_model(
 		`num_epochs`: number of epochs to train for
 		`learning_rate`: learning rate to use for training
 		`t_limit`: training will occur between time 1 and `t_limit`
+		`compute_mmd`: if True, compute some performance metrics at the end of
+			training
+		`val_data_loader`: if `compute_mmd` is True, this must be another data
+			loader (like `data_loader`) which yields validation-set objects
+		`mmd_sample_size`: number of graphs to compute MMD over
 	"""
 	run_num = _run._id
 	output_dir = os.path.join(MODEL_DIR, str(run_num))
@@ -203,3 +213,127 @@ def train_graph_model(
 		if os.path.islink(link_path):
 			os.remove(link_path)
 		os.symlink(os.path.basename(model_path), link_path)
+
+	# If required, compute MMD metrics
+	if compute_mmd:
+		num_batches = int(np.ceil(mmd_sample_size / data_loader.batch_size))
+		train_graphs_1, train_graphs_2 = [], []
+		gen_graphs = []
+		data_iter_1, data_iter_2 = iter(data_loader), iter(val_data_loader)
+		print("Generating %d graphs over %d batches" % (
+			mmd_sample_size, num_batches)
+		)
+		for i in range(num_batches):
+			print("Batch %d/%d" % (i + 1, num_batches))
+			data = next(data_iter_1)
+			train_graphs_1.extend(
+				graph_conversions.split_pyg_data_to_nx_graphs(data)
+			)
+			data = next(data_iter_2)
+			train_graphs_2.extend(
+				graph_conversions.split_pyg_data_to_nx_graphs(data)
+			)
+			edges = graph_conversions.pyg_data_to_edge_vector(data)
+			sampled_edges = diffuser.sample_prior(
+				edges.shape[0], # Samples will be E x 1
+				torch.tile(torch.tensor([t_limit], device=DEVICE), edges.shape)
+			)[:, 0]  # Shape: E
+			data.edge_index = graph_conversions.edge_vector_to_pyg_data(
+				data, sampled_edges
+			)
+		
+			samples = generate.generate_graph_samples(
+				model, diffuser, data, t_limit=t_limit, verbose=True
+			)
+			gen_graphs.extend(
+				graph_conversions.split_pyg_data_to_nx_graphs(samples)
+			)
+		
+		train_graph_1 = train_graphs_1[:mmd_sample_size]
+		train_graph_2 = train_graphs_2[:mmd_sample_size]
+		gen_graphs = gen_graphs[:mmd_sample_size]
+		assert len(train_graphs_1) == mmd_sample_size
+		assert len(train_graphs_2) == mmd_sample_size
+		assert len(gen_graphs) == mmd_sample_size
+		all_graphs = train_graphs_1 + train_graphs_2 + gen_graphs
+			
+		# Compute MMD values
+		print("MMD (squared) values:")
+		square_func = np.square
+		kernel_type = "gaussian_total_variation"
+		
+		degree_hists = mmd.make_histograms(
+			graph_metrics.get_degrees(all_graphs), bin_width=1
+		)
+		degree_mmd_1 = square_func(mmd.compute_maximum_mean_discrepancy(
+			degree_hists[:mmd_sample_size], degree_hists[-mmd_sample_size:],
+			kernel_type, sigma=1
+		))
+		degree_mmd_2 = square_func(mmd.compute_maximum_mean_discrepancy(
+			degree_hists[:mmd_sample_size],
+			degree_hists[mmd_sample_size:-mmd_sample_size],
+			kernel_type, sigma=1
+		))
+		_run.log_scalar("degree_mmd", degree_mmd_1)
+		_run.log_scalar("degree_mmd_baseline", degree_mmd_2)
+		print("Degree MMD ratio: %.8f/%.8f = %.8f" % (
+			degree_mmd_1, degree_mmd_2, degree_mmd_1 / degree_mmd_2
+		))
+		
+		cluster_coef_hists = mmd.make_histograms(
+			graph_metrics.get_clustering_coefficients(all_graphs), num_bins=100
+		)
+		cluster_coef_mmd_1 = square_func(mmd.compute_maximum_mean_discrepancy(
+			cluster_coef_hists[:mmd_sample_size],
+			cluster_coef_hists[-mmd_sample_size:],
+			kernel_type, sigma=0.1
+		))
+		cluster_coef_mmd_2 = square_func(mmd.compute_maximum_mean_discrepancy(
+			cluster_coef_hists[:mmd_sample_size],
+			cluster_coef_hists[mmd_sample_size:-mmd_sample_size],
+			kernel_type, sigma=0.1
+		))
+		_run.log_scalar("cluster_coef_mmd", cluster_coef_mmd_1)
+		_run.log_scalar("cluster_coef_mmd_baseline", cluster_coef_mmd_2)
+		print("Clustering coefficient MMD ratio: %.8f/%.8f = %.8f" % (
+			cluster_coef_mmd_1, cluster_coef_mmd_2,
+			cluster_coef_mmd_1 / cluster_coef_mmd_2
+		))
+		
+		spectra_hists = mmd.make_histograms(
+			graph_metrics.get_spectra(all_graphs),
+			bin_array=np.linspace(-1e-5, 2, 200 + 1)
+		)
+		spectra_mmd_1 = square_func(mmd.compute_maximum_mean_discrepancy(
+			spectra_hists[:mmd_sample_size], spectra_hists[-mmd_sample_size:],
+			kernel_type, sigma=1
+		))
+		spectra_mmd_2 = square_func(mmd.compute_maximum_mean_discrepancy(
+			spectra_hists[:mmd_sample_size],
+			spectra_hists[mmd_sample_size:-mmd_sample_size],
+			kernel_type, sigma=1
+		))
+		_run.log_scalar("spectra_mmd", spectra_mmd_1)
+		_run.log_scalar("spectra_mmd_baseline", spectra_mmd_2)
+		print("Spectrum MMD ratio: %.8f/%.8f = %.8f" % (
+			spectra_mmd_1, spectra_mmd_2, spectra_mmd_1 / spectra_mmd_2
+		))
+		
+		orbit_counts = graph_metrics.get_orbit_counts(all_graphs)
+		orbit_counts = np.stack([
+			np.mean(counts, axis=0) for counts in orbit_counts
+		])
+		orbit_mmd_1 = square_func(mmd.compute_maximum_mean_discrepancy(
+			orbit_counts[:mmd_sample_size], orbit_counts[-mmd_sample_size:],
+			kernel_type, normalize=False, sigma=30
+		))
+		orbit_mmd_2 = square_func(mmd.compute_maximum_mean_discrepancy(
+			orbit_counts[:mmd_sample_size],
+			orbit_counts[mmd_sample_size:-mmd_sample_size],
+			kernel_type, normalize=False, sigma=30
+		))
+		_run.log_scalar("orbit_mmd", orbit_mmd_1)
+		_run.log_scalar("orbit_mmd_baseline", orbit_mmd_2)
+		print("Orbit MMD ratio: %.8f/%.8f = %.8f" % (
+			orbit_mmd_1, orbit_mmd_2, orbit_mmd_1 / orbit_mmd_2
+		))

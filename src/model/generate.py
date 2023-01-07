@@ -64,7 +64,7 @@ def generate_samples(
 	
 	# Step backward through time starting at xt
 	x = xt
-	t_iter = tqdm.tqdm(enumerate(time_steps)) if verbose \
+	t_iter = tqdm.tqdm(enumerate(time_steps), total=len(time_steps)) if verbose \
 		else enumerate(time_steps)
 	for t_i, time_step in t_iter:
 		t = torch.ones(num_samples).to(DEVICE) * time_step
@@ -122,7 +122,7 @@ def generate_graph_samples(
 	
 	# Step backward through time starting at xt
 	x = xt
-	t_iter = tqdm.tqdm(enumerate(time_steps)) if verbose \
+	t_iter = tqdm.tqdm(enumerate(time_steps), total=len(time_steps)) if verbose \
 		else enumerate(time_steps)
 	for t_i, time_step in t_iter:
 		edges = graph_conversions.pyg_data_to_edge_vector(xt)
