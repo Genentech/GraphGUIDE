@@ -61,7 +61,11 @@ def to_dense(x, edge_index, edge_attr, batch):
 	edge_index, edge_attr = torch_geometric.utils.remove_self_loops(edge_index, edge_attr)
 	# TODO: carefully check if setting node_mask as a bool breaks the continuous case
 	max_num_nodes = X.size(1)
-	E = torch_geometric.utils.to_dense_adj(edge_index=edge_index, batch=batch, edge_attr=edge_attr, max_num_nodes=max_num_nodes)
+	if edge_index.numel() == 0:
+		# We have to do this check otherwise things fail
+		E = torch_geometric.utils.to_dense_adj(edge_index=edge_index, batch=batch, edge_attr=edge_attr)
+	else:
+		E = torch_geometric.utils.to_dense_adj(edge_index=edge_index, batch=batch, edge_attr=edge_attr, max_num_nodes=max_num_nodes)
 	E = encode_no_edge(E)
 
 	return PlaceHolder(X=X, E=E, y=None), node_mask
