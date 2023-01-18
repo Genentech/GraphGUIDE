@@ -315,8 +315,8 @@ class GraphLinkGAT(torch.nn.Module):
 		# Shape: V x D
 
 		# Pre-GNN dense layers on node features
-		node_embed = self.pregnn_dense_1(node_embed)
-		node_embed = self.pregnn_dense_2(node_embed)
+		node_embed = self.relu(self.pregnn_dense_1(node_embed))
+		node_embed = self.relu(self.pregnn_dense_2(node_embed))
 
 		# Create edge_index specifying the full dense subgraphs
 		full_edge_index = graph_conversions.edge_vector_to_pyg_data(
@@ -363,8 +363,8 @@ class GraphLinkGAT(torch.nn.Module):
 			)
 			
 		# Post-GNN dense layers on node features
-		node_embed = self.postgnn_dense_1(node_embed)
-		node_embed = self.postgnn_dense_2(node_embed)
+		node_embed = self.relu(self.postgnn_dense_1(node_embed))
+		node_embed = self.relu(self.postgnn_dense_2(node_embed))
 
 		# For all possible edges (i.e. node pairs), compute probability
 		node_embed_1 = node_embed[full_edge_index[0]]  # Shape: E x D'
