@@ -248,9 +248,9 @@ def train_graph_model(
 			gen_graphs.extend(
 				graph_conversions.split_pyg_data_to_nx_graphs(samples)
 			)
-		
-		train_graph_1 = train_graphs_1[:mmd_sample_size]
-		train_graph_2 = train_graphs_2[:mmd_sample_size]
+	
+		train_graphs_1 = train_graphs_1[:mmd_sample_size]
+		train_graphs_2 = train_graphs_2[:mmd_sample_size]
 		gen_graphs = gen_graphs[:mmd_sample_size]
 		assert len(train_graphs_1) == mmd_sample_size
 		assert len(train_graphs_2) == mmd_sample_size
