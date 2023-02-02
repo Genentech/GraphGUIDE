@@ -470,5 +470,5 @@ if __name__ == "__main__":
 	t = torch.rand(len(data.x)).to(DEVICE)
 
 	# Run the model
-	model = DiGressGNN(node_dim, 1).to(DEVICE)
+	model = DiGressGNN(node_dim, t_limit).to(DEVICE)
 	edge_pred = model(data, t)
