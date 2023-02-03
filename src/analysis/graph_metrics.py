@@ -19,7 +19,7 @@ def get_degrees(graphs):
 	result = []
 	for g in graphs:
 		degrees = nx.degree(g)
-		result.append(np.array([degrees[i] for i in range(len(g))]))
+		result.append(np.array([degrees[i] for i in g.nodes]))
 	return result
 
 
@@ -35,7 +35,7 @@ def get_clustering_coefficients(graphs):
 	result = []
 	for g in graphs:
 		coefs = nx.clustering(g)
-		result.append(np.array([coefs[i] for i in range(len(g))]))
+		result.append(np.array([coefs[i] for i in g.nodes]))
 	return result
 
 
@@ -70,7 +70,7 @@ def run_orca(graph, max_graphlet_size=4):
 	# Create input file
 	with open(in_path, "w") as f:
 		edges = graph.edges
-		f.write("%d %d\n" % (len(graph), len(edges)))
+		f.write("%d %d\n" % (max(graph.nodes) + 1, len(edges)))
 		for edge in edges:
 			f.write("%d %d\n" % edge)
 
