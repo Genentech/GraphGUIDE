@@ -83,7 +83,7 @@ def smiles_to_pyg_data(smiles, ignore_edge_attr=False):
 class ZINCDataset(torch.utils.data.Dataset):
 	def __init__(self, connectivity_only=False):
 		"""
-		Create a PyTorch IterableDataset which yields random graphs.
+		Create a PyTorch IterableDataset which yields molecular graphs.
 		Arguments:
 			`connectivity_only`: if True, only connectivity information is
 				retained, and no edge attributes will be included
